@@ -255,7 +255,7 @@ def notebook(
     port: int = typer.Option(8888, help="HTTP port"),
     host: str = typer.Option("0.0.0.0", help="Bind IP"),
     notebook_dir: Optional[Path] = typer.Option(
-        Path("/workspace/notebooks"), help="Notebook root dir (created if missing)"
+        Path(""), help="Notebook root dir (created if missing)"
     ),
     create_starter: bool = typer.Option(True, help="Create a starter notebook if missing"),
     model_name: str = typer.Option("openai/gpt-oss-20b", help="Default model in starter NB"),
