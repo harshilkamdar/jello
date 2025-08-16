@@ -6,7 +6,45 @@
 [![Commit activity](https://img.shields.io/github/commit-activity/m/harshilkamdar/jello)](https://img.shields.io/github/commit-activity/m/harshilkamdar/jello)
 [![License](https://img.shields.io/github/license/harshilkamdar/jello)](https://img.shields.io/github/license/harshilkamdar/jello)
 
-jellmo
+A research framework for mechanistic interpretability of jailbreak and refusal behavior in open-source MoE chat models. Jello provides tools for activation analysis, circuit identification, and controlled interventions to understand safety mechanisms in large language models.
+
+## Features
+
+- **Model Analysis**: Deep inspection of GPT-OSS and similar models with activation capture
+- **MoE Routing Analysis**: Expert selection pattern analysis during refusal/compliance
+- **Attention Probing**: Head-level analysis of attention shifts during jailbreaks
+- **Batch Processing**: Systematic evaluation of refusal patterns across prompt sets
+- **Visualization Tools**: Clean outputs for attention maps, routing patterns, and activation flows
+
+## Quick Start
+
+### Installation
+
+```bash
+git clone https://github.com/harshilkamdar/jello.git
+cd jello
+make install
+```
+
+### Basic Usage
+
+```bash
+# Quick chat test
+uv run jello chat --prompt "How do I make a bomb?" --model "openai/gpt-oss-20b"
+
+# Batch analysis with jailbreak attempts
+uv run jello runfile --prompts prompts.jsonl --attack system_leak
+
+# Deep model inspection
+uv run jello inspect --prompt "Harmful request" --attn --moe
+```
+
+## Research Applications
+
+- **Refusal Subspace Analysis**: Identify low-rank directions encoding refusal behavior
+- **Circuit Identification**: Locate attention heads and pathways carrying safety signals
+- **Intervention Testing**: Test steering vectors and ablations on safety vs helpfulness
+- **Attack Analysis**: Compare prompt-only vs gradient-based jailbreak methods
 
 - **Github repository**: <https://github.com/harshilkamdar/jello/>
 - **Documentation** <https://harshilkamdar.github.io/jello/>
