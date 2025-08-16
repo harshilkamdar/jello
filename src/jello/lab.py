@@ -14,6 +14,7 @@ from .analysis.introspect import (
     layer_activation_norms,
     attention_head_entropies,
 )
+from .notebook import launch_jupyter
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -124,3 +125,22 @@ def inspect(
     json.dump(summaries, open(outdir / "summary.json", "w"), indent=2)
     print("[bold]Saved:[/bold]", outdir)
     print(summaries)
+
+
+@app.command()
+def notebook(
+    port: int = typer.Option(8888, help="Jupyter Lab port"),
+    host: str = typer.Option("0.0.0.0", help="Host to bind to"),
+    model: str = typer.Option("openai/gpt-oss-20b", help="Model to pre-configure"),
+    no_starter: bool = typer.Option(False, help="Skip creating starter notebook"),
+):
+    """
+    Launch Jupyter Lab with pre-configured GPT-OSS model setup.
+    Perfect for Runpod GPU experimentation.
+    """
+    launch_jupyter(
+        port=port,
+        host=host,
+        create_starter=not no_starter,
+        model_name=model,
+    )
