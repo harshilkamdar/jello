@@ -125,4 +125,4 @@ ignore = [
 preview = true
 
 [project.scripts]
-jello = "jello.lab:app"
+jello = "jello.notebook:app"
