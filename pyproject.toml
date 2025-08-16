@@ -124,4 +124,5 @@ ignore = [
 [tool.ruff.format]
 preview = true
 
-
+[project.scripts]
+jello = "jello.lab:app"
