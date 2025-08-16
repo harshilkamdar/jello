@@ -118,14 +118,35 @@ class GPTOSS:
             **forward_kwargs,
         )
 
-        result = {"last_hidden_state": outputs.last_hidden_state}
+        result = {}
+        
+        # Try to get the main output (logits)
+        if hasattr(outputs, "logits") and outputs.logits is not None:
+            result["logits"] = outputs.logits
+        
+        # Try to get last hidden state (different attribute names in different models)
+        if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+            result["last_hidden_state"] = outputs.last_hidden_state
+        elif hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
+            # If no last_hidden_state, use the last layer from hidden_states
+            result["last_hidden_state"] = outputs.hidden_states[-1]
+        
+        # Hidden states (all layers)
         if hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
             result["hidden_states"] = outputs.hidden_states
+            
+        # Attention weights
         if hasattr(outputs, "attentions") and outputs.attentions is not None:
             result["attentions"] = outputs.attentions
-        # Optional MoE routing info
+            
+        # MoE routing info (various possible attribute names)
         if hasattr(outputs, "router_logits") and outputs.router_logits is not None:
             result["router_logits"] = outputs.router_logits
+        elif hasattr(outputs, "aux_loss") and outputs.aux_loss is not None:
+            # Some models put routing info in aux_loss
+            result["aux_loss"] = outputs.aux_loss
+            
+        # Expert indices
         if hasattr(outputs, "expert_indices") and outputs.expert_indices is not None:
             result["expert_indices"] = outputs.expert_indices
 
