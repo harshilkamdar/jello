@@ -283,7 +283,7 @@ def launch_jupyter(
     """Launch Jupyter Lab with optional starter notebook."""
     
     if notebook_dir is None:
-        notebook_dir = Path(".notebooks")
+        notebook_dir = Path("notebooks")
     
     notebook_dir.mkdir(exist_ok=True)
     
