@@ -94,35 +94,127 @@ class GPTOSS:
         self,
         messages: List[Dict[str, str]],
         output_hidden_states: bool = True,
-        output_attentions: bool = False,
+        output_attentions: bool = True,
         output_router_logits: bool = True,
+        generate: bool = True,
+        max_new_tokens: int = 512,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        return_intermediates: bool = True,
         **forward_kwargs,
     ) -> Dict[str, Any]:
         """
-        One forward pass (no generation) to expose internals:
-          - hidden_states: per-layer activations
-          - attentions: per-layer attn maps (if enabled)
-          - router_logits: MoE routing signals (if the architecture supports it)
-
-        Returns a dict with available fields.
+        Forward pass with generation to expose model internals and response.
+        
+        Args:
+            messages: Chat messages
+            output_hidden_states: Capture per-layer activations
+            output_attentions: Capture attention weights
+            output_router_logits: Capture MoE routing (if available)
+            generate: If True, run generation and capture intermediates
+            max_new_tokens: Tokens to generate (512 fits well on RTX 5090)
+            temperature: Sampling temperature (1.0 for diverse outputs)
+            top_p: Nucleus sampling parameter
+            return_intermediates: Capture per-token generation details
+            
+        Returns:
+            Dict with model internals, response, and per-token analysis.
         """
         inputs = _apply_chat_template(self.tokenizer, messages, self.model.device)
+        input_length = inputs["input_ids"].shape[-1]
+        
+        if not generate:
+            # Single forward pass (original behavior)
+            outputs = self.model(
+                **inputs,
+                use_cache=False,
+                output_hidden_states=output_hidden_states,
+                output_attentions=output_attentions,
+                output_router_logits=output_router_logits,
+                return_dict=True,
+                **forward_kwargs,
+            )
+            
+            result = self._extract_outputs(outputs, inputs)
+            result["input_tokens"] = self.tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+            return result
+        
+        else:
+            # Generation with intermediate capture
+            result = {
+                "input_ids": inputs["input_ids"],
+                "input_tokens": self.tokenizer.convert_ids_to_tokens(inputs["input_ids"][0]),
+                "generation_intermediates": [] if return_intermediates else None
+            }
+            
+            # Generate with internals capture
+            gen_outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=temperature > 0.0,
+                return_dict_in_generate=True,
+                output_hidden_states=output_hidden_states,
+                output_attentions=output_attentions,
+                output_scores=True,  # Token-level logits
+                **forward_kwargs,
+            )
+            
+            # Extract generated text
+            generated_ids = gen_outputs.sequences[0][input_length:]
+            result["generated_ids"] = generated_ids
+            result["generated_tokens"] = self.tokenizer.convert_ids_to_tokens(generated_ids)
+            result["response"] = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+            
+            # Extract generation internals if available
+            if hasattr(gen_outputs, "hidden_states") and gen_outputs.hidden_states:
+                result["hidden_states"] = gen_outputs.hidden_states
+            if hasattr(gen_outputs, "attentions") and gen_outputs.attentions:
+                result["attentions"] = gen_outputs.attentions
+            if hasattr(gen_outputs, "scores") and gen_outputs.scores:
+                result["scores"] = gen_outputs.scores  # Per-token logits
+                
+            # Token-level analysis
+            if return_intermediates and hasattr(gen_outputs, "scores"):
+                for i, token_scores in enumerate(gen_outputs.scores):
+                    token_id = generated_ids[i].item()
+                    token_str = self.tokenizer.decode([token_id])
+                    probs = torch.softmax(token_scores[0], dim=-1)
+                    
+                    intermediate = {
+                        "step": i,
+                        "token_id": token_id,
+                        "token": token_str,
+                        "probability": probs[token_id].item(),
+                        "top_k_probs": torch.topk(probs, k=10),
+                        "entropy": -(probs * torch.log(probs + 1e-12)).sum().item(),
+                    }
+                    result["generation_intermediates"].append(intermediate)
+            
+            return result
 
-        outputs = self.model(
-            **inputs,
-            use_cache=False,
-            output_hidden_states=output_hidden_states,
-            output_attentions=output_attentions,
-            output_router_logits=output_router_logits,  # many MoE models expose this
-            return_dict=True,
-            **forward_kwargs,
-        )
-
+    def _extract_outputs(self, outputs, inputs) -> Dict[str, Any]:
+        """Extract available outputs from model forward pass."""
         result = {}
         
         # Try to get the main output (logits)
         if hasattr(outputs, "logits") and outputs.logits is not None:
             result["logits"] = outputs.logits
+            
+            # Add probability analysis
+            last_token_logits = outputs.logits[0, -1, :]  # Last position
+            last_token_probs = torch.softmax(last_token_logits, dim=-1)
+            result["last_token_probs"] = last_token_probs
+            result["last_token_entropy"] = -(last_token_probs * torch.log(last_token_probs + 1e-12)).sum()
+            
+            # Top predictions for next token
+            top_k = torch.topk(last_token_probs, k=10)
+            result["next_token_predictions"] = {
+                "token_ids": top_k.indices,
+                "tokens": [self.tokenizer.decode([tid]) for tid in top_k.indices],
+                "probabilities": top_k.values
+            }
         
         # Try to get last hidden state (different attribute names in different models)
         if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
