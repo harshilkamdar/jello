@@ -1,10 +1,12 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
+import os
 import random
 import numpy as np
 import torch
+from contextlib import nullcontext
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -26,26 +28,35 @@ def _seed_everything(seed: int, deterministic: bool = False) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     if deterministic:
         # May reduce performance and disable some fast kernels.
+        # Note: for full determinism with CUDA, set CUBLAS_WORKSPACE_CONFIG
+        # BEFORE CUDA context is created (ideally at process start).
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
         torch.use_deterministic_algorithms(True)
-        # These two mostly affect CNNs, but are harmless here:
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
 
 
-def _make_generator(seed: Optional[int], device: torch.device | str) -> Optional[torch.Generator]:
+def _seeded_generation_ctx(seed: Optional[int], device: torch.device | str) -> Any:
     """
-    Return a per-device torch.Generator seeded with `seed` (or None to skip).
-    Using a generator makes HF `.generate()` sampling reproducible.
+    Fork RNG state so per-call seeding doesn't leak globally.
+    Works on CPU-only and CUDA. Use around `model.generate(...)`.
     """
     if seed is None:
-        return None
-    g = torch.Generator(device=device)
-    g.manual_seed(int(seed))
-    return g
+        return nullcontext()
+    # Choose CUDA device(s) to fork if applicable
+    devs = None
+    dev_str = str(device)
+    if torch.cuda.is_available() and "cuda" in dev_str:
+        if isinstance(device, torch.device) and device.index is not None:
+            devs = [device.index]
+        else:
+            devs = [torch.cuda.current_device()]
+    return torch.random.fork_rng(devices=devs, enabled=True)
 
 
 def _apply_chat_template(tokenizer, messages: List[Dict[str, str]], model_device) -> Dict[str, Any]:
@@ -86,7 +97,7 @@ class GPTOSS:
         temperature: float = 0.2,
         top_p: float = 0.95,
         do_sample: Optional[bool] = None,
-        seed: Optional[int] = None,   # NEW
+        seed: Optional[int] = None,
         **gen_kwargs,
     ) -> str:
         """
@@ -94,19 +105,25 @@ class GPTOSS:
         Set `seed` to make sampling reproducible (falls back to self.seed).
         """
         inputs = _apply_chat_template(self.tokenizer, messages, self.model.device)
-        generator = _make_generator(seed if seed is not None else self.seed, self.model.device)
+        seed_to_use = seed if seed is not None else self.seed
 
-        out = self.model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            do_sample=(temperature > 0.0 if do_sample is None else do_sample),
-            generator=generator,  # NEW
-            return_dict_in_generate=True,
-            output_scores=False,
-            **gen_kwargs,
-        )
+        with _seeded_generation_ctx(seed_to_use, self.model.device):
+            if seed_to_use is not None:
+                torch.manual_seed(seed_to_use)
+                if torch.cuda.is_available() and "cuda" in str(self.model.device):
+                    torch.cuda.manual_seed_all(seed_to_use)
+
+            out = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=(temperature > 0.0 if do_sample is None else do_sample),
+                return_dict_in_generate=True,
+                output_scores=False,
+                **gen_kwargs,
+            )
+
         # Decode only newly generated tokens
         start = inputs["input_ids"].shape[-1]
         return self.tokenizer.decode(out.sequences[0][start:], skip_special_tokens=True)
@@ -115,20 +132,25 @@ class GPTOSS:
     def generate_raw(
         self,
         input_ids: torch.LongTensor,
-        seed: Optional[int] = None,  # NEW
+        seed: Optional[int] = None,
         **gen_kwargs,
     ) -> Dict[str, Any]:
         """
         Lower-level generate: pass raw token IDs if you prepare inputs yourself
         (e.g., Harmony prefill IDs).
         """
-        generator = _make_generator(seed if seed is not None else self.seed, self.model.device)
-        return self.model.generate(
-            input_ids=input_ids.to(self.model.device),
-            generator=generator,  # NEW
-            return_dict_in_generate=True,
-            **gen_kwargs,
-        )
+        seed_to_use = seed if seed is not None else self.seed
+        with _seeded_generation_ctx(seed_to_use, self.model.device):
+            if seed_to_use is not None:
+                torch.manual_seed(seed_to_use)
+                if torch.cuda.is_available() and "cuda" in str(self.model.device):
+                    torch.cuda.manual_seed_all(seed_to_use)
+
+            return self.model.generate(
+                input_ids=input_ids.to(self.model.device),
+                return_dict_in_generate=True,
+                **gen_kwargs,
+            )
 
     @torch.inference_mode()
     def forward_inspect(
@@ -142,18 +164,18 @@ class GPTOSS:
         temperature: float = 1.0,
         top_p: float = 0.9,
         return_intermediates: bool = True,
-        seed: Optional[int] = None,  # NEW
+        seed: Optional[int] = None,
         **forward_kwargs,
     ) -> Dict[str, Any]:
         """
         Forward pass with generation to expose model internals and response.
 
-        Reproducibility: pass a `seed` (or set self.seed on the instance). We forward a
-        torch.Generator into `generate()` so sampling is deterministic w.r.t. the seed.
+        Reproducibility: pass a `seed` (or set self.seed on the instance).
+        We fork RNG and reseed inside the context so results are deterministic
+        with respect to the seed without polluting global RNG state.
         """
         inputs = _apply_chat_template(self.tokenizer, messages, self.model.device)
         input_length = inputs["input_ids"].shape[-1]
-        generator = _make_generator(seed if seed is not None else self.seed, self.model.device)
 
         if not generate:
             # Single forward pass (deterministic in eval mode)
@@ -177,19 +199,25 @@ class GPTOSS:
                 "generation_intermediates": [] if return_intermediates else None
             }
 
-            gen_outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=temperature > 0.0,
-                generator=generator,  # NEW
-                return_dict_in_generate=True,
-                output_hidden_states=output_hidden_states,
-                output_attentions=output_attentions,
-                output_scores=True,  # Token-level logits
-                **forward_kwargs,
-            )
+            seed_to_use = seed if seed is not None else self.seed
+            with _seeded_generation_ctx(seed_to_use, self.model.device):
+                if seed_to_use is not None:
+                    torch.manual_seed(seed_to_use)
+                    if torch.cuda.is_available() and "cuda" in str(self.model.device):
+                        torch.cuda.manual_seed_all(seed_to_use)
+
+                gen_outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    do_sample=temperature > 0.0,
+                    return_dict_in_generate=True,
+                    output_hidden_states=output_hidden_states,
+                    output_attentions=output_attentions,
+                    output_scores=True,  # Token-level logits
+                    **forward_kwargs,
+                )
 
             # Extract generated text
             generated_ids = gen_outputs.sequences[0][input_length:]
@@ -217,7 +245,7 @@ class GPTOSS:
                         "step": i,
                         "token_id": token_id,
                         "token": token_str,
-                        "probability": probs[token_id].item(),
+                        "probability": float(probs[token_id].item()),
                         "top_k_ids": top_idx.tolist(),
                         "top_k_tokens": [self.tokenizer.decode([tid]) for tid in top_idx],
                         "top_k_probs": top_vals.tolist(),
@@ -274,15 +302,16 @@ def load_gptoss(
     device_map: str | Dict[str, int] | None = "auto",
     attn_implementation: Optional[str] = None,
     trust_remote_code: bool = True,
-    seed: Optional[int] = None,           # NEW
-    deterministic: bool = False,          # NEW
+    seed: Optional[int] = None,
+    deterministic: bool = False,
     **model_kwargs,
 ) -> GPTOSS:
     """
     Loader tuned for GPT-OSS.
 
     For strict reproducibility, set `seed` (and optionally `deterministic=True`),
-    and consider `attn_implementation="eager"`.
+    and consider `attn_implementation="eager"` if fused/flash attention kernels
+    are slightly non-deterministic on your stack.
     """
     if seed is not None:
         _seed_everything(seed, deterministic=deterministic)
