@@ -216,6 +216,7 @@ class GPTOSS:
                     output_hidden_states=output_hidden_states,
                     output_attentions=output_attentions,
                     output_scores=True,  # Token-level logits
+                    output_router_logits=output_router_logits
                     **forward_kwargs,
                 )
 
