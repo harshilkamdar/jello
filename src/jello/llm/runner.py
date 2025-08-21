@@ -14,6 +14,45 @@ from transformers import (
 from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList
 
 
+import inspect
+import torch
+
+def _infer_single_device(model) -> torch.device | None:
+    """Return a single device if the whole model is on one device; else None."""
+    try:
+        if getattr(model, "hf_device_map", None):
+            return None  # sharded/offloaded
+        return next(model.parameters()).device
+    except StopIteration:
+        return None
+    except Exception:
+        return None
+
+def _embedding_device(model) -> torch.device | None:
+    """
+    Prefer the device of the input embedding matrix; this is where input_ids must live.
+    Falls back to a single model device if available.
+    """
+    try:
+        emb = model.get_input_embeddings()
+        if emb is not None and hasattr(emb, "weight"):
+            return emb.weight.device
+    except Exception:
+        pass
+    return _infer_single_device(model)
+
+def _prepare_inputs_for_model(inputs: dict, model) -> dict:
+    """
+    Move all tensor inputs (input_ids, attention_mask, position_ids, etc.) to the
+    input embedding device. This is safe for sharded models because only indices
+    need to be co-located with the embedding weights for the first op.
+    """
+    dev = _embedding_device(model)
+    if dev is None:
+        return inputs  # keep on CPU if truly unknown
+    # Hugging Face BatchEncoding has .to; dict of tensors also works with .to via torch's utility.
+    return inputs.to(dev)
+
 # -------------------------------
 # 1) Safer dtype handling
 # -------------------------------
@@ -255,21 +294,14 @@ class GPTOSS:
         thread.join()
 
     @torch.inference_mode()
-    def generate_raw(
-        self,
-        input_ids: torch.LongTensor,
-        **gen_kwargs,
-    ) -> Dict[str, Any]:
-        """
-        Lower-level generate: pass raw token IDs if you prepare inputs yourself
-        (e.g., Harmony prefill IDs).
-        """
+    def generate_raw(self, input_ids: torch.LongTensor, **gen_kwargs) -> Dict[str, Any]:
+        dev = _embedding_device(self.model) or input_ids.device
         return self.model.generate(
-            input_ids=input_ids.to(_infer_single_device(self.model) or input_ids.device),
+            input_ids=input_ids.to(dev),
             return_dict_in_generate=True,
             **gen_kwargs,
         )
-
+    
     # ---------- inspection API ----------
 
     @torch.inference_mode()
