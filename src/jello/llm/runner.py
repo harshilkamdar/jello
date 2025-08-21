@@ -305,6 +305,7 @@ def load_gptoss(
     trust_remote_code: bool = True,
     seed: Optional[int] = None,
     deterministic: bool = False,
+    output_router_logits = False
     **model_kwargs,
 ) -> GPTOSS:
     """
@@ -330,4 +331,5 @@ def load_gptoss(
     mdl = AutoModelForCausalLM.from_pretrained(model_name_or_path, **kwargs)
     mdl.eval()  # ensure dropout etc. are off
 
-    return GPTOSS(model=mdl, tokenizer=tok, model_name_or_path=model_name_or_path, seed=seed)
+    return GPTOSS(model=mdl, tokenizer=tok, model_name_or_path=model_name_or_path, seed=seed, 
+                  output_router_logits=output_router_logits)
