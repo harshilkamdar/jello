@@ -305,7 +305,7 @@ def load_gptoss(
     trust_remote_code: bool = True,
     seed: Optional[int] = None,
     deterministic: bool = False,
-    output_router_logits = False
+    output_router_logits = False,
     **model_kwargs,
 ) -> GPTOSS:
     """
